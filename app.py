@@ -14,7 +14,7 @@ st.set_page_config(
 
 # Title and description
 st.title("📊 WooWonder Data Extractor")
-st.markdown("Export user data and articles from WooWonder to CSV files")
+st.markdown("Export user data and articles from WooWonder to CSV files with enhanced data processing")
 
 # Sidebar for configuration
 st.sidebar.header("🔧 Configuration")
@@ -41,30 +41,143 @@ with st.sidebar.expander("API Settings", expanded=True):
     )
 
 # Helper functions
-def make_api_request(endpoint, post_data=None):
-    """Make API request to WooWonder"""
-    try:
-        url = f"{site_url.rstrip('/')}/api/{endpoint}?access_token={access_token}"
-        
-        if post_data:
-            post_data['server_key'] = server_key
-            response = requests.post(url, data=post_data)
-        else:
-            response = requests.get(url)
-        
-        response.raise_for_status()
-        return response.json()
-    except requests.exceptions.RequestException as e:
-        st.error(f"API request failed: {str(e)}")
-        return None
-    except json.JSONDecodeError:
-        st.error("Invalid JSON response from API")
-        return None
+def make_api_request(endpoint, post_data=None, retries=3):
+    """Make API request to WooWonder with retry logic"""
+    for attempt in range(retries):
+        try:
+            url = f"{site_url.rstrip('/')}/api/{endpoint}?access_token={access_token}"
+            
+            if post_data:
+                post_data['server_key'] = server_key
+                response = requests.post(url, data=post_data, timeout=30)
+            else:
+                response = requests.get(url, timeout=30)
+            
+            response.raise_for_status()
+            return response.json()
+            
+        except requests.exceptions.RequestException as e:
+            if attempt == retries - 1:
+                st.error(f"API request failed after {retries} attempts: {str(e)}")
+                return None
+            time.sleep(2 ** attempt)  # Exponential backoff
+            
+        except json.JSONDecodeError:
+            st.error("Invalid JSON response from API")
+            return None
+    
+    return None
 
-def export_to_csv(data, filename):
-    """Export data to CSV and provide download link"""
+def extract_author_info(author_data):
+    """Extract author username and email from author field"""
+    if not author_data:
+        return None, None
+    
+    # If author_data is a string, try to parse it as JSON
+    if isinstance(author_data, str):
+        try:
+            author_data = json.loads(author_data)
+        except json.JSONDecodeError:
+            return None, None
+    
+    # If it's a dictionary, extract username and email
+    if isinstance(author_data, dict):
+        username = author_data.get('username', '')
+        email = author_data.get('email', '')
+        return username, email
+    
+    return None, None
+
+def process_articles_data(articles_data):
+    """Process articles data to extract author information and flatten nested fields"""
+    processed_articles = []
+    
+    for article in articles_data:
+        processed_article = article.copy()
+        
+        # Extract author information
+        author_data = article.get('author', {})
+        author_username, author_email = extract_author_info(author_data)
+        
+        processed_article['author_username'] = author_username
+        processed_article['author_email'] = author_email
+        
+        # Flatten author data if it's a dict
+        if isinstance(author_data, dict):
+            for key, value in author_data.items():
+                if key not in ['username', 'email']:  # Don't duplicate
+                    processed_article[f'author_{key}'] = value
+        
+        # Process other nested fields
+        if 'category' in article and isinstance(article['category'], dict):
+            category_data = article['category']
+            processed_article['category_name'] = category_data.get('name', '')
+            processed_article['category_id'] = category_data.get('id', '')
+        
+        # Convert timestamps to readable format
+        for date_field in ['time', 'created_at', 'updated_at']:
+            if date_field in processed_article and processed_article[date_field]:
+                try:
+                    timestamp = int(processed_article[date_field])
+                    processed_article[f'{date_field}_readable'] = datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S')
+                except (ValueError, TypeError):
+                    pass
+        
+        processed_articles.append(processed_article)
+    
+    return processed_articles
+
+def process_users_data(users_data):
+    """Process users data to flatten nested fields"""
+    processed_users = []
+    
+    for user in users_data:
+        processed_user = user.copy()
+        
+        # Flatten details field
+        if 'details' in user and isinstance(user['details'], dict):
+            details = user['details']
+            for key, value in details.items():
+                processed_user[f'details_{key}'] = value
+        
+        # Process notification settings
+        if 'notification_settings' in user:
+            try:
+                if isinstance(user['notification_settings'], str):
+                    notification_settings = json.loads(user['notification_settings'])
+                else:
+                    notification_settings = user['notification_settings']
+                
+                for key, value in notification_settings.items():
+                    processed_user[f'notification_{key}'] = value
+            except (json.JSONDecodeError, TypeError):
+                pass
+        
+        # Convert timestamps to readable format
+        for date_field in ['lastseen', 'last_data_update', 'point_day_expire']:
+            if date_field in processed_user and processed_user[date_field]:
+                try:
+                    timestamp = int(processed_user[date_field])
+                    processed_user[f'{date_field}_readable'] = datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S')
+                except (ValueError, TypeError):
+                    pass
+        
+        processed_users.append(processed_user)
+    
+    return processed_users
+
+def export_to_csv(data, filename, process_func=None):
+    """Export data to CSV with optional processing and provide download link"""
     if data:
+        # Process data if processing function is provided
+        if process_func:
+            data = process_func(data)
+        
         df = pd.DataFrame(data)
+        
+        # Clean column names
+        df.columns = df.columns.str.replace('[^a-zA-Z0-9_]', '_', regex=True)
+        
         csv = df.to_csv(index=False)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename_with_timestamp = f"{filename}_{timestamp}.csv"
@@ -73,18 +186,53 @@ def export_to_csv(data, filename):
             label=f"📥 Download {filename_with_timestamp}",
             data=csv,
             file_name=filename_with_timestamp,
-            mime="text/csv"
+            mime="text/csv",
+            key=f"download_{filename}_{timestamp}"
         )
         
         return df
     return None
+
+def display_data_preview(df, data_type="Data"):
+    """Display enhanced data preview with filtering options"""
+    st.subheader(f"📋 {data_type} Preview")
+    
+    # Search functionality
+    search_term = st.text_input(f"🔍 Search {data_type.lower()}", key=f"search_{data_type}")
+    
+    if search_term:
+        # Search across all string columns
+        mask = df.astype(str).apply(lambda x: x.str.contains(search_term, case=False, na=False)).any(axis=1)
+        filtered_df = df[mask]
+        st.info(f"Showing {len(filtered_df)} results for '{search_term}'")
+    else:
+        filtered_df = df
+    
+    # Column selection
+    all_columns = list(df.columns)
+    if len(all_columns) > 10:
+        default_columns = all_columns[:10]
+        selected_columns = st.multiselect(
+            f"Select columns to display (showing first 10 by default)",
+            options=all_columns,
+            default=default_columns,
+            key=f"columns_{data_type}"
+        )
+    else:
+        selected_columns = all_columns
+    
+    # Display data
+    if selected_columns:
+        st.dataframe(filtered_df[selected_columns], use_container_width=True, height=400)
+    else:
+        st.warning("Please select at least one column to display")
 
 # Main content
 if not all([site_url, access_token, server_key]):
     st.warning("⚠️ Please fill in all API configuration fields in the sidebar to proceed.")
 else:
     # Create tabs for different data types
-    tab1, tab2 = st.tabs(["👥 Users Data", "📰 Articles Data"])
+    tab1, tab2, tab3 = st.tabs(["👥 Users Data", "📰 Articles Data", "📊 Analytics"])
     
     with tab1:
         st.header("👥 Users Data Extraction")
@@ -101,43 +249,61 @@ else:
         with col2:
             st.markdown("### Options")
             fetch_users_btn = st.button("🔄 Fetch Users Data", type="primary")
+            
+            # Batch processing option
+            batch_size = st.number_input("Batch Size", min_value=1, max_value=100, value=10, 
+                                       help="Process users in batches to avoid API limits")
         
         if fetch_users_btn and user_ids_input:
-            with st.spinner("Fetching users data..."):
-                post_data = {
-                    'user_ids': user_ids_input.strip()
-                }
+            user_ids = [uid.strip() for uid in user_ids_input.split(',') if uid.strip()]
+            
+            if user_ids:
+                progress_bar = st.progress(0)
+                status_text = st.empty()
                 
-                result = make_api_request('get-many-users-data', post_data)
+                all_users_data = []
                 
-                if result and result.get('api_status') == 200:
-                    users_data = result.get('users', [])
+                # Process in batches
+                for i in range(0, len(user_ids), batch_size):
+                    batch_ids = user_ids[i:i+batch_size]
+                    batch_ids_str = ','.join(batch_ids)
                     
-                    if users_data:
-                        st.success(f"✅ Successfully fetched {len(users_data)} users")
-                        
-                        # Display preview
-                        st.subheader("📋 Data Preview")
-                        df = pd.DataFrame(users_data)
-                        st.dataframe(df, use_container_width=True)
-                        
-                        # Export option
-                        st.subheader("💾 Export Data")
-                        export_to_csv(users_data, "woowonder_users")
+                    status_text.text(f"Processing batch {i//batch_size + 1}/{(len(user_ids)-1)//batch_size + 1}")
+                    
+                    post_data = {'user_ids': batch_ids_str}
+                    result = make_api_request('get-many-users-data', post_data)
+                    
+                    if result and result.get('api_status') == 200:
+                        batch_users = result.get('users', [])
+                        all_users_data.extend(batch_users)
+                    
+                    progress_bar.progress((i + batch_size) / len(user_ids))
+                    time.sleep(0.5)  # Rate limiting
+                
+                if all_users_data:
+                    st.success(f"✅ Successfully fetched {len(all_users_data)} users")
+                    
+                    # Process and display data
+                    df = export_to_csv(all_users_data, "woowonder_users", process_users_data)
+                    
+                    if df is not None:
+                        display_data_preview(df, "Users")
                         
                         # Show summary statistics
                         st.subheader("📊 Summary")
-                        col1, col2, col3 = st.columns(3)
+                        col1, col2, col3, col4 = st.columns(4)
                         with col1:
-                            st.metric("Total Users", len(users_data))
+                            st.metric("Total Users", len(all_users_data))
                         with col2:
                             st.metric("Columns", len(df.columns))
                         with col3:
-                            st.metric("Data Size", f"{df.memory_usage().sum()} bytes")
-                    else:
-                        st.warning("No users data found")
+                            st.metric("Active Users", len(df[df['active'] == '1']) if 'active' in df.columns else 0)
+                        with col4:
+                            st.metric("Verified Users", len(df[df['verified'] == '1']) if 'verified' in df.columns else 0)
                 else:
-                    st.error("Failed to fetch users data. Please check your API configuration.")
+                    st.warning("No users data found")
+            else:
+                st.error("Please enter valid user IDs")
     
     with tab2:
         st.header("📰 Articles Data Extraction")
@@ -190,6 +356,12 @@ else:
             st.markdown("### Quick Actions")
             if st.button("📊 Get Latest 100 Articles"):
                 limit = 100
+                offset = 0
+                fetch_articles_btn = True
+            
+            if st.button("📈 Get Latest 500 Articles"):
+                limit = 500
+                offset = 0
                 fetch_articles_btn = True
         
         if fetch_articles_btn:
@@ -214,45 +386,65 @@ else:
                     if articles_data:
                         st.success(f"✅ Successfully fetched {len(articles_data)} articles")
                         
-                        # Display preview
-                        st.subheader("📋 Data Preview")
-                        df = pd.DataFrame(articles_data)
-                        st.dataframe(df, use_container_width=True)
+                        # Process and display data
+                        df = export_to_csv(articles_data, "woowonder_articles", process_articles_data)
                         
-                        # Export option
-                        st.subheader("💾 Export Data")
-                        export_to_csv(articles_data, "woowonder_articles")
-                        
-                        # Show summary statistics
-                        st.subheader("📊 Summary")
-                        col1, col2, col3, col4 = st.columns(4)
-                        with col1:
-                            st.metric("Total Articles", len(articles_data))
-                        with col2:
-                            st.metric("Columns", len(df.columns))
-                        with col3:
-                            st.metric("Data Size", f"{df.memory_usage().sum()} bytes")
-                        with col4:
-                            if 'category' in df.columns:
-                                st.metric("Unique Categories", df['category'].nunique())
+                        if df is not None:
+                            display_data_preview(df, "Articles")
+                            
+                            # Show summary statistics
+                            st.subheader("📊 Summary")
+                            col1, col2, col3, col4 = st.columns(4)
+                            with col1:
+                                st.metric("Total Articles", len(articles_data))
+                            with col2:
+                                st.metric("Columns", len(df.columns))
+                            with col3:
+                                unique_authors = df['author_username'].nunique() if 'author_username' in df.columns else 0
+                                st.metric("Unique Authors", unique_authors)
+                            with col4:
+                                unique_categories = df['category_name'].nunique() if 'category_name' in df.columns else 0
+                                st.metric("Unique Categories", unique_categories)
+                            
+                            # Author statistics
+                            if 'author_username' in df.columns:
+                                st.subheader("👥 Author Statistics")
+                                author_stats = df.groupby('author_username').size().sort_values(ascending=False)
+                                st.bar_chart(author_stats.head(10))
                     else:
                         st.warning("No articles data found")
                 else:
                     st.error("Failed to fetch articles data. Please check your API configuration.")
+    
+    with tab3:
+        st.header("📊 Analytics Dashboard")
+        st.info("This section will show analytics once you fetch some data from the other tabs.")
+        
+        # Placeholder for analytics
+        st.markdown("""
+        **Available Analytics:**
+        - User activity patterns
+        - Article publishing trends
+        - Category distribution
+        - Author performance metrics
+        - Engagement statistics
+        
+        *Fetch data from Users or Articles tabs to see analytics here.*
+        """)
 
 # Footer
 st.markdown("---")
 st.markdown(
     """
     <div style='text-align: center; color: #666;'>
-        <p>WooWonder Data Extractor | Built with Streamlit</p>
+        <p>Enhanced WooWonder Data Extractor | Built with Streamlit</p>
         <p><strong>Note:</strong> This tool is for authorized use only. Ensure you have proper permissions to access the API.</p>
     </div>
     """,
     unsafe_allow_html=True
 )
 
-# Instructions in sidebar
+# Enhanced instructions in sidebar
 with st.sidebar.expander("📖 Instructions", expanded=False):
     st.markdown("""
     **How to use:**
@@ -264,25 +456,47 @@ with st.sidebar.expander("📖 Instructions", expanded=False):
     
     2. **Users Data:**
        - Enter user IDs separated by commas
+       - Set batch size for large requests
        - Click "Fetch Users Data"
-       - Preview and download CSV
+       - Preview, search, and download CSV
     
     3. **Articles Data:**
        - Set your filter options
+       - Use quick actions for common requests
        - Click "Fetch Articles"
-       - Preview and download CSV
+       - Preview with author info and download CSV
+    
+    **Enhanced Features:**
+    - Author username/email extraction
+    - Batch processing for large datasets
+    - Data search and filtering
+    - Column selection for preview
+    - Improved error handling
+    - Progress tracking
     
     **Tips:**
     - Use smaller limits for initial testing
     - Check your API rate limits
     - Verify your access token is valid
+    - Use batch processing for large user lists
     """)
 
-# Status indicators
-if st.sidebar.button("🔍 Test API Connection"):
-    with st.spinner("Testing API connection..."):
-        test_result = make_api_request('get-articles', {'limit': 1})
-        if test_result and test_result.get('api_status') == 200:
-            st.sidebar.success("✅ API connection successful!")
-        else:
-            st.sidebar.error("❌ API connection failed. Check your settings.")
+# Enhanced status indicators
+with st.sidebar.expander("🔧 Tools", expanded=False):
+    if st.button("🔍 Test API Connection"):
+        with st.spinner("Testing API connection..."):
+            test_result = make_api_request('get-articles', {'limit': 1})
+            if test_result and test_result.get('api_status') == 200:
+                st.success("✅ API connection successful!")
+            else:
+                st.error("❌ API connection failed. Check your settings.")
+    
+    if st.button("🧹 Clear Cache"):
+        st.cache_data.clear()
+        st.success("✅ Cache cleared!")
+    
+    st.markdown("**API Status:**")
+    if all([site_url, access_token, server_key]):
+        st.success("✅ Configuration complete")
+    else:
+        st.warning("⚠️ Configuration incomplete")
