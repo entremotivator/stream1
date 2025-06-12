@@ -135,6 +135,8 @@ def bulk_fetch_articles(post_data, total_limit, progress_callback=None):
         time.sleep(1)  # Rate limiting between requests
     
     return all_articles
+
+def process_articles_data(articles_data):
     """Process articles data to extract author information and flatten nested fields"""
     processed_articles = []
     
@@ -428,15 +430,19 @@ else:
             bulk_export_btn = st.button("📦 Bulk Export", type="secondary")
             
             st.markdown("### Quick Actions")
-            if st.button("📊 Get Latest 100 Articles"):
-                limit = 100
-                offset = 0
-                fetch_articles_btn = True
-            
-            if st.button("📈 Get Latest 500 Articles"):
-                limit = 500
-                offset = 0
-                fetch_articles_btn = True
+            quick_100_btn = st.button("📊 Get Latest 100 Articles")
+            quick_500_btn = st.button("📈 Get Latest 500 Articles")
+        
+        # Handle quick actions
+        if quick_100_btn:
+            limit = 100
+            offset = 0
+            fetch_articles_btn = True
+        
+        if quick_500_btn:
+            limit = 500
+            offset = 0
+            fetch_articles_btn = True
         
         if fetch_articles_btn or bulk_export_btn:
             # Determine if this is a bulk export
@@ -456,6 +462,10 @@ else:
                 if article_id > 0:
                     post_data['article_id'] = article_id
                 
+                # Initialize result and articles_data
+                result = None
+                articles_data = []
+                
                 if is_bulk_export and target_limit > 1000:
                     # Use bulk fetch for large requests
                     progress_bar = st.progress(0)
@@ -464,22 +474,22 @@ else:
                     def progress_callback(message):
                         status_text.text(message)
                         # Update progress based on estimated completion
-                        current_progress = min(len(articles_data) / target_limit if 'articles_data' in locals() else 0, 1.0)
+                        current_progress = min(len(articles_data) / target_limit if articles_data else 0, 1.0)
                         progress_bar.progress(current_progress)
                     
                     articles_data = bulk_fetch_articles(post_data, target_limit, progress_callback)
                     progress_bar.progress(1.0)
                     status_text.text("Bulk fetch completed!")
                     
+                    # Create a mock result for consistency
+                    result = {'api_status': 200} if articles_data else {'api_status': 404}
+                    
                 else:
                     # Single request for smaller datasets
                     result = make_api_request('get-articles', post_data)
                     articles_data = result.get('articles', []) if result and result.get('api_status') == 200 else []
                 
-                
                 if result and result.get('api_status') == 200:
-                    articles_data = result.get('articles', [])
-                    
                     if articles_data:
                         st.success(f"✅ Successfully fetched {len(articles_data)} articles")
                         
