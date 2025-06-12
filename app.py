@@ -208,12 +208,30 @@ def display_data_preview(df, data_type="Data"):
     else:
         filtered_df = df
     
-    # Column selection
+    # Column selection with priority for author fields
     all_columns = list(df.columns)
     if len(all_columns) > 10:
-        default_columns = all_columns[:10]
+        # Prioritize author fields and other important columns
+        priority_columns = []
+        
+        # Always include author fields if available
+        if 'author_username' in all_columns:
+            priority_columns.append('author_username')
+        if 'author_email' in all_columns:
+            priority_columns.append('author_email')
+        
+        # Add other important columns
+        important_columns = ['id', 'title', 'content', 'username', 'email', 'name', 'first_name', 'last_name']
+        for col in important_columns:
+            if col in all_columns and col not in priority_columns:
+                priority_columns.append(col)
+        
+        # Fill remaining slots with other columns
+        remaining_columns = [col for col in all_columns if col not in priority_columns]
+        default_columns = priority_columns + remaining_columns[:10-len(priority_columns)]
+        
         selected_columns = st.multiselect(
-            f"Select columns to display (showing first 10 by default)",
+            f"Select columns to display (author fields selected by default)",
             options=all_columns,
             default=default_columns,
             key=f"columns_{data_type}"
