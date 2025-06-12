@@ -88,7 +88,53 @@ def extract_author_info(author_data):
     
     return None, None
 
-def process_articles_data(articles_data):
+def bulk_fetch_articles(post_data, total_limit, progress_callback=None):
+    """Fetch articles in bulk by paginating through API"""
+    all_articles = []
+    current_offset = post_data.get('offset', 0)
+    api_limit = min(1000, post_data.get('limit', 1000))  # API max is 1000
+    
+    total_fetched = 0
+    page = 1
+    
+    while total_fetched < total_limit:
+        # Calculate how many to fetch in this request
+        remaining = total_limit - total_fetched
+        current_limit = min(api_limit, remaining)
+        
+        # Prepare request data
+        current_post_data = post_data.copy()
+        current_post_data['limit'] = current_limit
+        current_post_data['offset'] = current_offset + total_fetched
+        
+        if progress_callback:
+            progress_callback(f"Fetching page {page} (offset {current_post_data['offset']}, limit {current_limit})")
+        
+        # Make API request
+        result = make_api_request('get-articles', current_post_data)
+        
+        if result and result.get('api_status') == 200:
+            articles_batch = result.get('articles', [])
+            
+            if not articles_batch:
+                # No more articles available
+                break
+            
+            all_articles.extend(articles_batch)
+            total_fetched += len(articles_batch)
+            
+            # If we got fewer articles than requested, we've reached the end
+            if len(articles_batch) < current_limit:
+                break
+                
+        else:
+            st.error(f"Failed to fetch page {page}. Stopping bulk fetch.")
+            break
+        
+        page += 1
+        time.sleep(1)  # Rate limiting between requests
+    
+    return all_articles
     """Process articles data to extract author information and flatten nested fields"""
     processed_articles = []
     
@@ -371,6 +417,16 @@ else:
             st.markdown("### Actions")
             fetch_articles_btn = st.button("🔄 Fetch Articles", type="primary")
             
+            st.markdown("### Bulk Export")
+            bulk_export_limit = st.selectbox(
+                "Bulk Export Size",
+                options=[1000, 2500, 5000, 10000],
+                index=0,
+                help="Automatically paginate through API to export large datasets"
+            )
+            
+            bulk_export_btn = st.button("📦 Bulk Export", type="secondary")
+            
             st.markdown("### Quick Actions")
             if st.button("📊 Get Latest 100 Articles"):
                 limit = 100
@@ -382,10 +438,14 @@ else:
                 offset = 0
                 fetch_articles_btn = True
         
-        if fetch_articles_btn:
-            with st.spinner("Fetching articles data..."):
+        if fetch_articles_btn or bulk_export_btn:
+            # Determine if this is a bulk export
+            is_bulk_export = bulk_export_btn
+            target_limit = bulk_export_limit if is_bulk_export else limit
+            
+            with st.spinner(f"Fetching {'bulk' if is_bulk_export else 'articles'} data..."):
                 post_data = {
-                    'limit': limit,
+                    'limit': min(1000, target_limit),  # API limit per request
                     'offset': offset
                 }
                 
@@ -396,7 +456,26 @@ else:
                 if article_id > 0:
                     post_data['article_id'] = article_id
                 
-                result = make_api_request('get-articles', post_data)
+                if is_bulk_export and target_limit > 1000:
+                    # Use bulk fetch for large requests
+                    progress_bar = st.progress(0)
+                    status_text = st.empty()
+                    
+                    def progress_callback(message):
+                        status_text.text(message)
+                        # Update progress based on estimated completion
+                        current_progress = min(len(articles_data) / target_limit if 'articles_data' in locals() else 0, 1.0)
+                        progress_bar.progress(current_progress)
+                    
+                    articles_data = bulk_fetch_articles(post_data, target_limit, progress_callback)
+                    progress_bar.progress(1.0)
+                    status_text.text("Bulk fetch completed!")
+                    
+                else:
+                    # Single request for smaller datasets
+                    result = make_api_request('get-articles', post_data)
+                    articles_data = result.get('articles', []) if result and result.get('api_status') == 200 else []
+                
                 
                 if result and result.get('api_status') == 200:
                     articles_data = result.get('articles', [])
@@ -429,6 +508,10 @@ else:
                                 st.subheader("👥 Author Statistics")
                                 author_stats = df.groupby('author_username').size().sort_values(ascending=False)
                                 st.bar_chart(author_stats.head(10))
+                            
+                            # Show fetch performance info
+                            if is_bulk_export:
+                                st.info(f"📈 Bulk export completed! Fetched {len(articles_data)} articles using automatic pagination.")
                     else:
                         st.warning("No articles data found")
                 else:
@@ -487,6 +570,8 @@ with st.sidebar.expander("📖 Instructions", expanded=False):
     **Enhanced Features:**
     - Author username/email extraction
     - Batch processing for large datasets
+    - **Bulk export up to 10,000 records**
+    - Automatic pagination for large exports
     - Data search and filtering
     - Column selection for preview
     - Improved error handling
@@ -494,9 +579,11 @@ with st.sidebar.expander("📖 Instructions", expanded=False):
     
     **Tips:**
     - Use smaller limits for initial testing
+    - Use "Bulk Export" for large datasets (auto-paginates)
     - Check your API rate limits
     - Verify your access token is valid
     - Use batch processing for large user lists
+    - Bulk export handles API 1000-record limit automatically
     """)
 
 # Enhanced status indicators
